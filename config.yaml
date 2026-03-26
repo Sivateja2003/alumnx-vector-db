@@ -10,4 +10,5 @@ embedding_model: models/gemini-embedding-001
 output_dimensionality: 3072
 vector_size: 3072
 vector_store_path: ./vector_store/
+document_store_path: ./document_store/
 min_page_text_length: 20

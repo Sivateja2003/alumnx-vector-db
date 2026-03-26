@@ -74,3 +74,15 @@ class ErrorResponse(BaseModel):
     error: str
     message: str
     detail: Optional[ErrorDetail] = None
+
+
+class DocumentResponse(BaseModel):
+    id: str = Field(..., description="Unique UUID for this document record.")
+    file_hash: str = Field(..., description="SHA-256 hash of the physical PDF file to prevent exact duplicates.")
+    original_filename: str = Field(..., description="The original filename of the document as uploaded.")
+    title: str = Field(..., description="Human readable title for the document. Defaults to original_filename if empty.")
+    description: Optional[str] = Field(None, description="Optional notes or context about the document.")
+    kb_name: Optional[str] = Field(None, description="Optional Knowledge Base name this document belongs to, useful for grouping files before vectorization.")
+    status: str = Field(..., description="Current status of the document lifecycle, e.g., 'UPLOADED'.")
+    file_size_bytes: int = Field(..., description="Physical file size in bytes.")
+    created_at: str = Field(..., description="ISO 8601 timestamp of when the document was uploaded.")
