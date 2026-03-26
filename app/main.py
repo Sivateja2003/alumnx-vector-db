@@ -11,7 +11,6 @@ from app.routers.knowledgebases import router as knowledgebases_router
 from app.routers.ingest import router as ingest_router
 from app.routers.retrieve import router as retrieve_router
 from app.routers.strategies import router as strategies_router
-from app.routers.documents import router as documents_router
 from app.errors import error_response
 
 
@@ -26,7 +25,6 @@ app.include_router(knowledgebases_router)
 app.include_router(ingest_router)
 app.include_router(retrieve_router)
 app.include_router(strategies_router)
-app.include_router(documents_router)
 
 
 @app.exception_handler(HTTPException)
