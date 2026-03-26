@@ -9,7 +9,10 @@ from app.config import get_config
 from app.models import KBResult, ChunkResult, RetrieveRequest, RetrieveResponse, RetrievalStrategy, StrategyGroupResult
 from app.services.embedding.embedder import GeminiEmbedder
 from app.services.retrieval.registry import get_retriever_registry
-from app.services.store.jsonl_store import JSONLStore
+from app.services.store.postgres_store import PostgresStore
+from app.services.store.vector_file_store import VectorFileStore
+from app.services.ingestion import UNIVERSAL_VECTOR_STORE
+from app.utils import slugify_name
 
 
 SUPPORTED_ALGORITHMS = {"knn"}
@@ -43,71 +46,94 @@ def _normalize(vector: list[float]) -> list[float]:
     return (array / norm).astype(float).tolist()
 
 
-def _to_chunk_results(rows: list[dict]) -> list[ChunkResult]:
-    return [
-        ChunkResult(
-            chunk_id=row["chunk_id"],
-            similarity_score=row["similarity_score"],
-            chunk_text=row["chunk_text"],
-            embedding_vector=row["embedding_vector"],
-            source_filename=row["source_filename"],
-            chunk_index=row["chunk_index"],
-            page_number=row.get("page_number"),
-            created_at=row["created_at"],
+def _retrieve_for_kb(
+    kb_name: str,
+    query: str,
+    k: int,
+    strategy: RetrievalStrategy,
+    embedding_model: str | None,
+    pg: PostgresStore,
+    vfs: VectorFileStore,
+) -> list[StrategyGroupResult]:
+    # Load all active chunk_id → (chunking_strategy, embedding_model) from PostgreSQL
+    group_index = pg.get_active_group_index(kb_name, embedding_model)
+    if not group_index:
+        logger.info("No active chunks found in kb_name=%s", kb_name)
+        return []
+
+    # Load vectors from the universal flat file
+    all_vectors, all_chunk_ids = vfs.read(UNIVERSAL_VECTOR_STORE)
+    if len(all_chunk_ids) == 0:
+        return []
+
+    chunk_id_to_pos = {cid: i for i, cid in enumerate(all_chunk_ids)}
+
+    # Group active chunks by (chunking_strategy, embedding_model)
+    groups: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+    for entry in group_index:
+        cid = entry["chunk_id"]
+        if cid in chunk_id_to_pos:
+            key = (entry["chunking_strategy"], entry["embedding_model"])
+            groups[key].append((cid, chunk_id_to_pos[cid]))
+
+    results: list[StrategyGroupResult] = []
+    for (chunking_strategy, model), id_pos_pairs in sorted(groups.items()):
+        group_ids = [cid for cid, _ in id_pos_pairs]
+        positions = [pos for _, pos in id_pos_pairs]
+        group_vectors = all_vectors[positions]
+
+        embedder = GeminiEmbedder(model)
+        logger.info(
+            "Retrieving group chunking_strategy=%s model=%s row_count=%s k=%s metric=%s",
+            chunking_strategy, model, len(group_ids), k, strategy.distance_metric,
         )
-        for row in rows
-    ]
+        query_vector = np.asarray(embedder.embed_query(query), dtype=np.float32)
+        if strategy.distance_metric == "cosine":
+            norm = np.linalg.norm(query_vector)
+            if norm > 0:
+                query_vector = query_vector / norm
 
+        # Pass numpy matrix directly — no Python list round-trip
+        retriever = get_retriever_registry()["knn"]
+        top_results = retriever.retrieve(
+            query_vector=query_vector,
+            vectors=group_vectors,
+            chunk_ids=group_ids,
+            k=k,
+            distance_metric=strategy.distance_metric,
+        )
+        top_chunk_ids = [cid for cid, _ in top_results]
+        similarity_by_id = {cid: score for cid, score in top_results}
 
-def _run_group(rows: list[dict], query: str, k: int, strategy: RetrievalStrategy, model: str, chunking_strategy: str) -> StrategyGroupResult:
-    embedder = GeminiEmbedder(model)
-    logger.info(
-        "Retrieving group chunking_strategy=%s model=%s row_count=%s k=%s metric=%s",
-        chunking_strategy,
-        model,
-        len(rows),
-        k,
-        strategy.distance_metric,
-    )
-    query_vector = embedder.embed_query(query)
-    if strategy.distance_metric == "cosine":
-        query_vector = _normalize(query_vector)
-        for row in rows:
-            row["normalised_vector"] = row.get("normalised_vector") or _normalize(row["embedding_vector"])
-    retriever = get_retriever_registry()["knn"]
-    top_rows = retriever.retrieve(query_vector=query_vector, rows=rows, k=k, distance_metric=strategy.distance_metric)
-    return StrategyGroupResult(
-        chunking_strategy=chunking_strategy,
-        embedding_model=model,
-        chunks=_to_chunk_results(top_rows),
-    )
+        # O(1) vector lookup by chunk_id — no list.index() scan
+        id_to_pos = {cid: i for i, cid in enumerate(group_ids)}
 
+        # Fetch full metadata for top-k from PostgreSQL
+        metadata_rows = pg.get_chunks_by_ids(top_chunk_ids)
+        meta_by_id = {r["chunk_id"]: r for r in metadata_rows}
 
-def _group_rows(rows: list[dict], embedding_model: str | None) -> dict[tuple[str, str], list[dict]]:
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for row in rows:
-        if embedding_model and row.get("embedding_model") != embedding_model:
-            continue
-        groups[(row["chunking_strategy"], row["embedding_model"])].append(row)
-    return groups
-
-
-def _kb_strategy_results(rows: list[dict], query: str, k: int, strategy: RetrievalStrategy, embedding_model: str | None) -> list[StrategyGroupResult]:
-    if embedding_model:
-        grouped = defaultdict(list)
-        for row in rows:
-            if row.get("embedding_model") == embedding_model:
-                grouped[row["chunking_strategy"]].append(row)
-        return [
-            _run_group(group_rows, query, k, strategy, embedding_model, chunking_strategy)
-            for chunking_strategy, group_rows in sorted(grouped.items())
+        chunks = [
+            ChunkResult(
+                chunk_id=cid,
+                similarity_score=similarity_by_id[cid],
+                chunk_text=meta_by_id[cid]["chunk_text"],
+                embedding_vector=group_vectors[id_to_pos[cid]].tolist(),
+                source_filename=meta_by_id[cid]["source_filename"],
+                chunk_index=meta_by_id[cid]["chunk_index"],
+                page_number=meta_by_id[cid].get("page_number"),
+                created_at=str(meta_by_id[cid]["created_at"]),
+            )
+            for cid in top_chunk_ids
+            if cid in meta_by_id
         ]
 
-    grouped = _group_rows(rows, None)
-    return [
-        _run_group(group_rows, query, k, strategy, model, chunking_strategy)
-        for (chunking_strategy, model), group_rows in sorted(grouped.items())
-    ]
+        results.append(StrategyGroupResult(
+            chunking_strategy=chunking_strategy,
+            embedding_model=model,
+            chunks=chunks,
+        ))
+
+    return results
 
 
 def retrieve_documents(request: RetrieveRequest) -> RetrieveResponse:
@@ -115,43 +141,29 @@ def retrieve_documents(request: RetrieveRequest) -> RetrieveResponse:
     strategy = request.retrieval_strategy or _default_retrieval_strategy()
     strategy = _validate_retrieval_strategy(strategy)
     k = request.k or config.knn_k
-    store = JSONLStore()
+    pg = PostgresStore()
+    vfs = VectorFileStore()
+    pg.ensure_table()
+
     logger.info("Retrieve pipeline started query=%r kb_name=%s k=%s embedding_model=%s", request.query, request.kb_name, k, request.embedding_model)
 
     if not request.query.strip():
         raise ValueError("EMPTY_QUERY")
 
     if request.kb_name:
-        kb_name = request.kb_name
-        kb_path = store.kb_path(kb_name)
-        if not kb_path.exists():
-            raise FileNotFoundError(kb_name)
-        rows = [row for row in store.read_rows(kb_name) if row.get("is_active")]
-        logger.info("Loaded kb_name=%s active_rows=%s", kb_name, len(rows))
-        strategy_results = _kb_strategy_results(rows, request.query, k, strategy, request.embedding_model)
-        return RetrieveResponse(
-            query=request.query,
-            retrieval_strategy_used=strategy,
-            k_used=k,
-            results=[KBResult(kb_name=kb_name, strategy_results=strategy_results)],
-        )
+        resolved = slugify_name(request.kb_name)
+        if not pg.kb_exists(resolved):
+            raise FileNotFoundError(resolved)
+        kb_names = [resolved]
+    else:
+        kb_names = pg.list_kb_names()
+        if not kb_names:
+            logger.info("No knowledge bases found")
+            return RetrieveResponse(query=request.query, retrieval_strategy_used=strategy, k_used=k, results=[])
 
     kb_results: list[KBResult] = []
-    kb_files = store.list_kb_files()
-    if not kb_files:
-        logger.info("No knowledge base files found in vector store")
-        return RetrieveResponse(
-            query=request.query,
-            retrieval_strategy_used=strategy,
-            k_used=k,
-            results=[],
-        )
-
-    for file_path in kb_files:
-        kb_name = file_path.stem
-        rows = [row for row in store.read_rows(kb_name) if row.get("is_active")]
-        logger.info("Loaded kb_name=%s active_rows=%s", kb_name, len(rows))
-        strategy_results = _kb_strategy_results(rows, request.query, k, strategy, request.embedding_model)
+    for kb_name in kb_names:
+        strategy_results = _retrieve_for_kb(kb_name, request.query, k, strategy, request.embedding_model, pg, vfs)
         kb_results.append(KBResult(kb_name=kb_name, strategy_results=strategy_results))
 
     logger.info("Retrieve pipeline completed kb_count=%s", len(kb_results))

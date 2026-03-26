@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ class AppConfig:
     vector_size: int
     vector_store_path: Path
     min_page_text_length: int
+    postgres_url: str
 
 
 _CONFIG_CACHE: AppConfig | None = None
@@ -45,6 +47,10 @@ def get_config() -> AppConfig:
     if not vector_store_path.is_absolute():
         vector_store_path = (project_root() / vector_store_path).resolve()
 
+    postgres_url = os.environ.get("POSTGRES_URL", "")
+    if not postgres_url:
+        raise RuntimeError("POSTGRES_URL environment variable is not set")
+
     _CONFIG_CACHE = AppConfig(
         chunk_size=int(raw["chunk_size"]),
         overlap_size=int(raw["overlap_size"]),
@@ -57,6 +63,7 @@ def get_config() -> AppConfig:
         vector_size=int(raw["vector_size"]),
         vector_store_path=vector_store_path,
         min_page_text_length=int(raw["min_page_text_length"]),
+        postgres_url=postgres_url,
     )
     return _CONFIG_CACHE
 

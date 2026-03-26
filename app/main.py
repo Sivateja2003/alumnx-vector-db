@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 from app.routers.chunking import router as chunking_router
+from app.routers.documents import router as documents_router
 from app.routers.knowledgebases import router as knowledgebases_router
 from app.routers.ingest import router as ingest_router
 from app.routers.retrieve import router as retrieve_router
@@ -21,10 +22,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 app = FastAPI(title="NexVec", version="1.3.0")
 
 app.include_router(chunking_router)
+app.include_router(documents_router)
 app.include_router(knowledgebases_router)
 app.include_router(ingest_router)
 app.include_router(retrieve_router)
 app.include_router(strategies_router)
+
+
+@app.get("/")
+async def root():
+    return {"message": "NexVec API is running! Access the docs at /docs"}
 
 
 @app.exception_handler(HTTPException)

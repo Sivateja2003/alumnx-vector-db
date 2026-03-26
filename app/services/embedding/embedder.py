@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable
+from google import genai
+from google.genai import types
 
 from app.config import get_config
 
@@ -10,32 +11,37 @@ class GeminiEmbedder:
         self.config = get_config()
         self.model = model or self.config.embedding_model
 
-    def _client(self):
-        try:
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
-        except ImportError as exc:
-            raise RuntimeError("langchain-google-genai is required for embedding") from exc
-        return GoogleGenerativeAIEmbeddings(model=self.model)
+    def _client(self) -> genai.Client:
+        return genai.Client()
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of document chunks. Batched in groups of 100."""
         if not texts:
             return []
         client = self._client()
         vectors: list[list[float]] = []
         for start in range(0, len(texts), 100):
             batch = texts[start : start + 100]
-            vectors.extend(
-                client.embed_documents(
-                    batch,
+            result = client.models.embed_content(
+                model=self.model,
+                contents=batch,
+                config=types.EmbedContentConfig(
+                    task_type="retrieval_document",
                     output_dimensionality=self.config.output_dimensionality,
-                )
+                ),
             )
+            vectors.extend(e.values for e in result.embeddings)
         return vectors
 
     def embed_query(self, text: str) -> list[float]:
+        """Embed a single retrieval query."""
         client = self._client()
-        return client.embed_query(
-            text,
-            output_dimensionality=self.config.output_dimensionality,
+        result = client.models.embed_content(
+            model=self.model,
+            contents=[text],
+            config=types.EmbedContentConfig(
+                task_type="retrieval_query",
+                output_dimensionality=self.config.output_dimensionality,
+            ),
         )
-
+        return result.embeddings[0].values
