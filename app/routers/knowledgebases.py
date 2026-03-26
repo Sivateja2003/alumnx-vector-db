@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.services.store.jsonl_store import JSONLStore
+from app.services.store.postgres_store import PostgresStore
 
 
 router = APIRouter()
@@ -10,7 +10,7 @@ router = APIRouter()
 
 @router.get("/knowledgebases")
 def list_knowledgebases() -> dict:
-    store = JSONLStore()
-    kb_names = [path.stem for path in store.list_kb_files()]
-    return {"knowledgebases": kb_names}
+    pg = PostgresStore()
+    pg.ensure_table()
+    return {"knowledgebases": pg.list_kb_names()}
 

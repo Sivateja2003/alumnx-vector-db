@@ -8,4 +8,5 @@ services:
       - ./vector_store:/app/vector_store
     env_file:
       - .env
+    # Required env vars: GOOGLE_API_KEY, POSTGRES_URL
     restart: unless-stopped

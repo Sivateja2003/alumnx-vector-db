@@ -12,35 +12,46 @@ class KNNRetriever(BaseRetriever):
 
     def retrieve(
         self,
-        query_vector: list[float],
-        rows: list[dict],
+        query_vector: np.ndarray,
+        vectors: np.ndarray,
+        chunk_ids: list[str],
         k: int,
         distance_metric: str = "cosine",
-    ) -> list[dict]:
-        if not rows:
-            return []
-        if k <= 0:
+    ) -> list[tuple[str, float]]:
+        """
+        Vectorised exact KNN using a single BLAS matrix-vector multiply.
+
+        Complexity:
+          - Scoring:  O(N × D) — one matrix multiply, fully parallelised by numpy/BLAS
+          - Top-k:    O(N)     — argpartition, not sort
+          - Sorting k winners: O(k log k) — negligible since k << N
+
+        For 10k chunks × 3072 dims this runs in ~1-3ms on CPU.
+        """
+        n = len(chunk_ids)
+        if n == 0 or k <= 0:
             return []
 
-        query = np.asarray(query_vector, dtype=float)
+        q = np.asarray(query_vector, dtype=np.float32)
+        mat = np.asarray(vectors, dtype=np.float32)  # no-op if already float32 ndarray
+
         if distance_metric == "cosine":
-            norm = np.linalg.norm(query)
+            # Stored vectors are already L2-normalised at ingest time.
+            # Normalise the query once here → cosine = dot product.
+            norm = np.linalg.norm(q)
             if norm > 0:
-                query = query / norm
-        scored: list[dict] = []
-
-        if distance_metric == "cosine":
-            for row in rows:
-                vector = np.asarray(row["normalised_vector"], dtype=float)
-                score = float(np.dot(query, vector))
-                scored.append({**row, "similarity_score": score})
-        elif distance_metric == "dot_product":
-            for row in rows:
-                vector = np.asarray(row["embedding_vector"], dtype=float)
-                score = float(np.dot(query, vector))
-                scored.append({**row, "similarity_score": score})
-        else:
+                q = q / norm
+        elif distance_metric != "dot_product":
             raise ValueError(f"Unsupported distance metric: {distance_metric}")
 
-        scored.sort(key=lambda item: item["similarity_score"], reverse=True)
-        return scored[:k]
+        # Single BLAS SGEMV call — entire scoring in one shot
+        scores: np.ndarray = mat @ q  # shape (N,)
+
+        # O(N) partial sort — only guarantee top-k are in the last k positions
+        actual_k = min(k, n)
+        top_idx = np.argpartition(scores, -actual_k)[-actual_k:]
+
+        # Sort only the k winners — O(k log k), negligible
+        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
+
+        return [(chunk_ids[i], float(scores[i])) for i in top_idx]

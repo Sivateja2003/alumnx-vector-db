@@ -7,12 +7,11 @@ import numpy as np
 
 from app.config import get_config
 from app.models import IngestResponse, StrategyResult
-from pathlib import Path
 from app.services.chunking.registry import get_chunker_registry
 from app.services.embedding.embedder import GeminiEmbedder
-from app.services.pdf_extractor import extract_pdf_pages, ExtractedPage
-from app.services.store.duplicate_checker import find_duplicate_rows
-from app.services.store.jsonl_store import JSONLStore
+from app.services.pdf_extractor import extract_pdf_pages
+from app.services.store.postgres_store import PostgresStore
+from app.services.store.vector_file_store import VectorFileStore
 from app.utils import now_ist, now_ist_iso, slugify_name
 
 
@@ -28,12 +27,13 @@ def _normalise_vector(vector: list[float]) -> list[float]:
     return (array / norm).astype(float).tolist()
 
 
+UNIVERSAL_VECTOR_STORE = "nex_vec"
+
+
 def _resolve_kb_name(source_filename: str, provided_kb_name: str | None) -> str:
     if provided_kb_name:
         return slugify_name(provided_kb_name)
-    stem = slugify_name(source_filename)
-    timestamp = now_ist().strftime("%Y%m%d_%H%M")
-    return f"{stem}_{timestamp}"
+    return UNIVERSAL_VECTOR_STORE
 
 
 def _chunk_page_text(chunker, page_number: int, text: str) -> list[tuple[int, str]]:
@@ -52,99 +52,44 @@ def ingest_file(
     overwrite: bool,
 ) -> IngestResponse:
     config = get_config()
-    store = JSONLStore()
+    pg = PostgresStore()
+    vfs = VectorFileStore()
+    pg.ensure_table()
+
     resolved_kb_name = _resolve_kb_name(file_name, kb_name)
     logger.info("Resolved kb_name=%s for source=%s", resolved_kb_name, file_name)
 
     if chunking_strategy not in SUPPORTED_CHUNKING_STRATEGIES:
         raise ValueError("Unsupported chunking strategy requested.")
 
-    target_path = store.kb_path(resolved_kb_name)
-    existing_rows = store.read_rows(resolved_kb_name) if target_path.exists() else []
-    # If both strategies are requested, we need to consider each strategy independently.
     strategy_names = ["fixed_length", "paragraph"] if chunking_strategy == "both" else [chunking_strategy]
+    active_model = embedding_model or config.embedding_model
+
+    # Duplicate detection
     active_duplicates_by_strategy = {
-        strategy: find_duplicate_rows(
-            existing_rows,
-            source_filename=file_name,
-            chunking_strategy=strategy,
-            embedding_model=embedding_model or config.embedding_model,
-        )
+        strategy: pg.has_active_chunks(file_name, strategy, active_model, resolved_kb_name)
         for strategy in strategy_names
     }
 
     if not overwrite:
-        duplicate_hit = next((strategy for strategy, rows in active_duplicates_by_strategy.items() if rows), None)
+        duplicate_hit = next((s for s, has_dup in active_duplicates_by_strategy.items() if has_dup), None)
         if duplicate_hit:
             logger.info(
                 "Duplicate ingestion rejected source=%s kb_name=%s strategy=%s model=%s",
-                file_name,
-                resolved_kb_name,
-                duplicate_hit,
-                embedding_model or config.embedding_model,
+                file_name, resolved_kb_name, duplicate_hit, active_model,
             )
             raise FileExistsError(
-                f"Active chunks already exist for file={file_name}, strategy={duplicate_hit}, model={embedding_model or config.embedding_model}"
+                f"Active chunks already exist for file={file_name}, strategy={duplicate_hit}, model={active_model}"
             )
 
-    if overwrite and existing_rows:
+    if overwrite and any(active_duplicates_by_strategy.values()):
         logger.info("Overwrite enabled; deactivating matching rows in kb_name=%s", resolved_kb_name)
         deactivated_at = now_ist_iso()
-        for row in existing_rows:
-            if row.get("source_filename") == file_name and row.get("chunking_strategy") in strategy_names and row.get("embedding_model") == (embedding_model or config.embedding_model) and row.get("is_active"):
-                row["is_active"] = False
-                row["deactivated_at"] = deactivated_at
-        store.update_rows(resolved_kb_name, existing_rows)
-        existing_rows = store.read_rows(resolved_kb_name)
+        deactivated_ids = pg.deactivate_chunks(file_name, strategy_names, active_model, resolved_kb_name, deactivated_at)
+        if deactivated_ids:
+            vfs.remove_chunk_ids(UNIVERSAL_VECTOR_STORE, set(deactivated_ids))
+            logger.info("Removed %s vectors from flat file for kb_name=%s", len(deactivated_ids), resolved_kb_name)
 
-    ext = Path(file_path).suffix.lower()
-    is_media = ext in (".png", ".jpg", ".jpeg", ".mp4", ".mov", ".mp3", ".wav", ".m4a")
-
-    embedder = GeminiEmbedder(embedding_model or config.embedding_model)
-    created_at = now_ist_iso()
-
-    if is_media:
-        # ── Native multimodal embedding: one vector per file ──────────
-        logger.info("Generating native multimodal embedding for %s", file_name)
-        vector = embedder.embed_file(file_path)
-        strategy_name = strategy_names[0]  # use first strategy label
-        row = {
-            "chunk_id": str(uuid.uuid4()),
-            "kb_name": resolved_kb_name,
-            "source_filename": file_name,
-            "chunking_strategy": strategy_name,
-            "chunk_index": 0,
-            "page_number": None,
-            "chunk_text": f"[media:{file_name}]",
-            "embedding_model": embedder.model,
-            "embedding_vector": vector,
-            "normalised_vector": _normalise_vector(vector),
-            "vector_size": config.vector_size,
-            "chunk_size_used": None,
-            "overlap_size_used": None,
-            "is_active": True,
-            "created_at": created_at,
-            "deactivated_at": None,
-            "file_type": ext.lstrip("."),
-        }
-        store.write_rows(resolved_kb_name, [row])
-        logger.info("Wrote 1 media row to kb_name=%s", resolved_kb_name)
-        return IngestResponse(
-            kb_name=resolved_kb_name,
-            source_filename=file_name,
-            strategies_processed=[
-                StrategyResult(
-                    strategy_name=strategy_name,
-                    chunk_count=1,
-                    embedding_model=embedder.model,
-                    vector_size=config.vector_size,
-                    overwritten=overwrite and bool(active_duplicates_by_strategy.get(strategy_name)),
-                )
-            ],
-            ingested_at=created_at,
-        )
-
-    # ── PDF / text path: extract → chunk → embed text ─────────────────
     pages = extract_pdf_pages(file_path)
     if not pages:
         raise LookupError("NO_EXTRACTABLE_TEXT")
@@ -156,9 +101,10 @@ def ingest_file(
         raise ValueError("overlap_size must be smaller than chunk_size")
 
     chunkers = get_chunker_registry(effective_chunk_size, effective_overlap_size)
+    embedder = GeminiEmbedder(active_model)
+    created_at = now_ist_iso()
 
     strategies_processed: list[StrategyResult] = []
-    new_rows: list[dict] = []
     for strategy_name in strategy_names:
         logger.info("Starting chunking strategy=%s", strategy_name)
         chunker = chunkers[strategy_name]
@@ -171,10 +117,17 @@ def ingest_file(
         vectors = embedder.embed_texts(chunk_texts)
         if len(vectors) != len(indexed_chunks):
             raise RuntimeError("Embedding vector count does not match chunk count.")
-        strategy_rows: list[dict] = []
+
+        chunk_ids: list[str] = []
+        pg_rows: list[dict] = []
+        normalised_vectors: list[list[float]] = []
+
         for index, ((page_number, chunk_text), vector) in enumerate(zip(indexed_chunks, vectors)):
-            row = {
-                "chunk_id": str(uuid.uuid4()),
+            cid = str(uuid.uuid4())
+            chunk_ids.append(cid)
+            normalised_vectors.append(_normalise_vector(vector))
+            pg_rows.append({
+                "chunk_id": cid,
                 "kb_name": resolved_kb_name,
                 "source_filename": file_name,
                 "chunking_strategy": strategy_name,
@@ -182,30 +135,25 @@ def ingest_file(
                 "page_number": page_number,
                 "chunk_text": chunk_text,
                 "embedding_model": embedder.model,
-                "embedding_vector": vector,
-                "normalised_vector": _normalise_vector(vector),
-                "vector_size": config.vector_size,
-                "chunk_size_used": effective_chunk_size,
-                "overlap_size_used": effective_overlap_size if strategy_name == "fixed_length" else None,
                 "is_active": True,
                 "created_at": created_at,
                 "deactivated_at": None,
-            }
-            strategy_rows.append(row)
-        new_rows.extend(strategy_rows)
-        logger.info("Prepared %s rows for strategy=%s", len(strategy_rows), strategy_name)
+            })
+
+        pg.insert_chunks(pg_rows)
+        vfs.append(UNIVERSAL_VECTOR_STORE, chunk_ids, np.array(normalised_vectors, dtype=np.float32))
+        logger.info("Stored %s chunks for strategy=%s kb_name=%s", len(chunk_ids), strategy_name, resolved_kb_name)
+
         strategies_processed.append(
             StrategyResult(
                 strategy_name=strategy_name,
-                chunk_count=len(strategy_rows),
+                chunk_count=len(chunk_ids),
                 embedding_model=embedder.model,
                 vector_size=config.vector_size,
                 overwritten=overwrite and bool(active_duplicates_by_strategy.get(strategy_name)),
             )
         )
 
-    store.write_rows(resolved_kb_name, new_rows)
-    logger.info("Wrote %s rows to kb_name=%s", len(new_rows), resolved_kb_name)
     return IngestResponse(
         kb_name=resolved_kb_name,
         source_filename=file_name,

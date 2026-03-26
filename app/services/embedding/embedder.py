@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+
+from google import genai
+from google.genai import types
 
 from app.config import get_config
 
@@ -29,20 +31,13 @@ class GeminiEmbedder:
         self.config = get_config()
         self.model = model or self.config.embedding_model
 
-    def _client(self):
-        try:
-            from google import genai
-        except ImportError as exc:
-            raise RuntimeError(
-                "google-genai is required for embedding. "
-                "Install it with: pip install google-genai"
-            ) from exc
+    def _client(self) -> genai.Client:
         return genai.Client()
 
     # ── Text embedding ────────────────────────────────────────────────
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of text strings, batching as needed."""
+        """Embed a list of document chunks. Batched in groups of 100."""
         if not texts:
             return []
         client = self._client()
@@ -52,18 +47,24 @@ class GeminiEmbedder:
             result = client.models.embed_content(
                 model=self.model,
                 contents=batch,
-                config={"output_dimensionality": self.config.output_dimensionality},
+                config=types.EmbedContentConfig(
+                    task_type="retrieval_document",
+                    output_dimensionality=self.config.output_dimensionality,
+                ),
             )
-            vectors.extend([emb.values for emb in result.embeddings])
+            vectors.extend(e.values for e in result.embeddings)
         return vectors
 
     def embed_query(self, text: str) -> list[float]:
-        """Embed a single query string."""
+        """Embed a single retrieval query."""
         client = self._client()
         result = client.models.embed_content(
             model=self.model,
-            contents=text,
-            config={"output_dimensionality": self.config.output_dimensionality},
+            contents=[text],
+            config=types.EmbedContentConfig(
+                task_type="retrieval_query",
+                output_dimensionality=self.config.output_dimensionality,
+            ),
         )
         return result.embeddings[0].values
 
@@ -76,11 +77,6 @@ class GeminiEmbedder:
 
         Returns a single embedding vector for the file.
         """
-        try:
-            from google.genai import types
-        except ImportError as exc:
-            raise RuntimeError("google-genai is required for multimodal embedding") from exc
-
         path = Path(file_path)
         if mime_type is None:
             mime_type = _MIME_TYPES.get(path.suffix.lower())
@@ -96,6 +92,8 @@ class GeminiEmbedder:
         result = client.models.embed_content(
             model=self.model,
             contents=[part],
-            config={"output_dimensionality": self.config.output_dimensionality},
+            config=types.EmbedContentConfig(
+                output_dimensionality=self.config.output_dimensionality,
+            ),
         )
         return result.embeddings[0].values
