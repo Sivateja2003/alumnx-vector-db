@@ -36,12 +36,20 @@ else
 fi
 
 # Reload or Start with PM2
+if command -v uv > /dev/null; then
+    CMD="uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+else
+    ./venv/bin/pip install uvicorn  # Ensure uvicorn is in venv
+    CMD="./venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+fi
+
 if pm2 describe "$APP_NAME" > /dev/null 2>&1; then
-    echo "Reloading $APP_NAME..."
-    pm2 reload "$APP_NAME"
+    echo "Updating and Reloading $APP_NAME..."
+    pm2 delete "$APP_NAME"
+    pm2 start "$CMD" --name "$APP_NAME"
 else
     echo "Starting $APP_NAME for the first time..."
-    pm2 start "uv run uvicorn main:app --host 0.0.0.0 --port $PORT" --name "$APP_NAME"
+    pm2 start "$CMD" --name "$APP_NAME"
 fi
 
 # Save pm2 state
