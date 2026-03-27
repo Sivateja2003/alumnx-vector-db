@@ -20,12 +20,7 @@ jobs:
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
           script: |
-            # If the script doesn't exist yet on the prod server, we might need a different initial step.
-            # Assuming deploy.sh is in the repo and the user manualy places it once or it's handled by git clone.
-            # Since deploy.sh is part of the repo, and we have the code, we'll assume it exists if cloned.
-            
             if [ ! -d "~/alumnx-vector-db-prod" ]; then
-              mkdir -p ~/alumnx-vector-db-prod
               git clone https://github.com/alumnx-ai-labs/alumnx-vector-db.git ~/alumnx-vector-db-prod
             fi
             cd ~/alumnx-vector-db-prod && bash deploy.sh main 8012 alumnx-vector-db-prod
