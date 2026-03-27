@@ -1,2 +1,2 @@
-"""Service layer for NexVec."""
+"""Service layer for Alumnx Vector DB."""
 

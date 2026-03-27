@@ -1,2 +1,2 @@
-"""NexVec application package."""
+"""Alumnx Vector DB application package."""
 

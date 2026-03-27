@@ -1,12 +1,16 @@
 services:
   vector-db:
     build: .
-    container_name: alumnx-vector-db
+    container_name: ${CONTAINER_NAME:-alumnx-vector-db}
     ports:
       - "8000:8000"
     volumes:
       - ./vector_store:/app/vector_store
     env_file:
       - .env
-    # Required env vars: GOOGLE_API_KEY, POSTGRES_URL
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

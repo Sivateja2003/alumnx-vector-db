@@ -24,6 +24,6 @@ os.environ.setdefault("POSTGRES_URL", "postgresql://test:test@localhost/test")
 
 def pytest_collection_modifyitems(config, items):
     if not os.environ.get("GOOGLE_API_KEY"):
-        skip_marker = pytest.mark.skip(reason="GOOGLE_API_KEY is not set; skipping NexVec test suite.")
+        skip_marker = pytest.mark.skip(reason="GOOGLE_API_KEY is not set; skipping Alumnx Vector DB test suite.")
         for item in items:
             item.add_marker(skip_marker)
