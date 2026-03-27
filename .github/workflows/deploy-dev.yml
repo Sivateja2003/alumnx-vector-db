@@ -23,4 +23,4 @@ jobs:
             if [ ! -d "~/alumnx-vector-db-dev" ]; then
               git clone https://github.com/alumnx-ai-labs/alumnx-vector-db.git ~/alumnx-vector-db-dev
             fi
-            cd ~/alumnx-vector-db-dev && bash deploy.sh dev 8001 alumnx-vector-db-dev
+            cd ~/alumnx-vector-db-dev && git fetch origin && git checkout dev && git pull origin dev && bash deploy.sh dev 8001 alumnx-vector-db-dev
