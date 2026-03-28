@@ -144,7 +144,8 @@ def ingest_file(
         raw_vec = embedder.embed_texts([primary_text])[0]
         cid = str(uuid.uuid4())
         chunk_ids[primary_section] = cid
-        normed = _normalise(np.asarray(raw_vec, dtype=np.float32))
+        raw_arr = np.asarray(raw_vec, dtype=np.float32)
+        normed = _normalise(raw_arr)
         stacked = np.stack([normed]).astype(np.float32)
         vfs.append(
             UNIVERSAL_VECTOR_STORE,
@@ -152,6 +153,7 @@ def ingest_file(
             stacked,
             text_records=[{"chunk_id": cid, "resume_id": resume_id, "vector": normed.tolist()}],
         )
+        vfs.append_raw(UNIVERSAL_VECTOR_STORE, [cid], np.stack([raw_arr]))
 
     # ── Persist resume row ────────────────────────────────────────────
     pg.insert_resume({
