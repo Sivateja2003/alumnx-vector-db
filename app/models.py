@@ -50,6 +50,8 @@ class CandidateResult(BaseModel):
     objectives: Optional[str] = None
     matched_sections: list[str] = []
     match_type: str = "rds"  # "rds" | "vector"
+    match_reason: Optional[str] = None       # why this result is being shown
+    matched_chunk_text: Optional[str] = None # the actual section text used for matching
 
 
 class QueryLogs(BaseModel):
@@ -61,6 +63,8 @@ class QueryLogs(BaseModel):
     vector_search_used: bool
     vector_section_used: Optional[str] = None  # "work_experience_text" | "projects" | None
     vector_query: Optional[str] = None
+    timing_ms: dict[str, float] = {}  # stage → milliseconds
+    op_counts: dict[str, int] = {}    # stage → operation count
 
 
 class RetrieveResponse(BaseModel):

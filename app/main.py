@@ -12,7 +12,9 @@ from app.routers.documents import router as documents_router
 from app.routers.ingest import router as ingest_router
 from app.routers.retrieve import router as retrieve_router
 from app.errors import error_response
+from app.services.ingestion import UNIVERSAL_VECTOR_STORE
 from app.services.store.postgres_store import PostgresStore
+from app.services.store.vector_file_store import VectorFileStore
 
 
 load_dotenv()
@@ -27,6 +29,9 @@ async def lifespan(_: FastAPI):
     logger.info("Running DB migrations...")
     PostgresStore().ensure_table()
     logger.info("DB ready.")
+    logger.info("Syncing alternate vector store formats (3.3, 3.4)...")
+    VectorFileStore().sync_alternate_formats(UNIVERSAL_VECTOR_STORE)
+    logger.info("Vector store sync complete.")
     yield
 
 

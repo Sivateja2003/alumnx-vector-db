@@ -321,6 +321,13 @@ class PostgresStore:
 
     # ── Document operations (for /documents endpoints) ────────────────
 
+    def get_active_resume_count(self) -> int:
+        """Return count of all active resumes — used for query observability."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM resumes WHERE is_active = TRUE")
+                return cur.fetchone()[0]
+
     def list_documents(self) -> list[dict]:
         sql = """
             SELECT r.resume_id, r.source_filename, r.created_at,
