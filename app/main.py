@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from dotenv import load_dotenv
 
+from app.routers.candidates import router as candidates_router
 from app.routers.documents import router as documents_router
 from app.routers.ingest import router as ingest_router
 from app.routers.retrieve import router as retrieve_router
@@ -31,6 +32,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="NexVec", version="1.3.0", lifespan=lifespan)
 
+app.include_router(candidates_router)
 app.include_router(documents_router)
 app.include_router(ingest_router)
 app.include_router(retrieve_router)
